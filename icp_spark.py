@@ -1,3 +1,6 @@
+import os
+import sys
+
 import numpy as np
 import time
 
@@ -166,7 +169,7 @@ def read_ply(path):
 
 def read_ply_from_table(tablename):
     # reading the table  from the location provided in the arguments
-    df = spark.sql("select * from newtable")
+    df = spark.sql("select * from " + tablename)
 
     # geting the dataframe as Numpy array
     POINT_CLOUD = np.array(df.collect())
@@ -184,12 +187,12 @@ def rotation_matrix(axis, theta):
                      [2 * (b * d - a * c), 2 * (c * d + a * b), a * a + d * d - b * b - c * c]])
 
 
-def run_icp():
-    A = read_ply('room_full.ply')
+def run_icp(A_ply, B_ply):
+    A = read_ply(A_ply)
     total_time = 0
 
     for i in range(num_tests):
-        B = read_ply('room_full_quarter_rotated.ply')
+        B = read_ply(B_ply)
 
         # Run ICP
         start = time.time()
@@ -205,7 +208,7 @@ def run_icp():
 
     print('icp time: {:.3}'.format(total_time / num_tests))
 
-    return C, T
+    return C, T, distances, iterations
 
 
 def import_packages(x):
@@ -215,11 +218,31 @@ def import_packages(x):
     return x
 
 
+def run_icp_map(filename):
+    A_ply = sys.argv[1]
+    C, T, distances, iterations = run_icp(A_ply=A_ply, B_ply=filename)
+    return {'filename': filename, 'C': C, 'T': T, 'distances': distances, 'iterations': iterations}
+
+
+def lowest_mean_distance_reduce(x, y):
+    mean_distance_x = np.mean(x['distances'])
+    mean_distance_y = np.mean(y['distances'])
+    if mean_distance_x > mean_distance_y:
+        return y
+    else:
+        return x
+
+
 if __name__ == "__main__":
-    sc = SparkContext(appName="test")
-    spark = SparkSession.builder.appName("PLYtoTable").getOrCreate()
-    int_rdd = sc.parallelize([1, 2, 3, 4])
-    int_rdd.map(lambda x: import_packages(x))
-    int_rdd.collect()
-    C, T = run_icp()
-    print(T)
+    sc = SparkContext(appName="Spark ICP room finder")
+    spark = SparkSession.builder.appName("Spark ICP room finder").getOrCreate()
+    num_of_executors = int(sc.getConf().get("spark.executor.instances"))
+    int_rdd = sc.parallelize(range(num_of_executors))
+    int_rdd.map(lambda x: import_packages(x)).collect()
+    A_ply = sys.argv[1]
+    room_paths = []
+    for filename in os.listdir(sys.argv[2]):
+        room_paths.append(filename)
+    dist_room_paths = sc.parallelize(room_paths)
+    most_probable_room = dist_room_paths.map(run_icp_map).reduce(lowest_mean_distance_reduce)
+    print(most_probable_room)
